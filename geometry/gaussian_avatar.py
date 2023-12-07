@@ -24,8 +24,9 @@ from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 from threestudio.models.geometry.base import BaseGeometry
 from threestudio.utils.typing import *
-from .poser import Skeleton
+
 from .network import NomalNet
+from .poser import Skeleton
 
 C0 = 0.28209479177387814
 
@@ -182,14 +183,16 @@ class Camera(NamedTuple):
 
 def save_ply(vertices):
     import pandas as pd
+
     # Convert the numpy array to a DataFrame
-    df = pd.DataFrame(vertices, columns=['x', 'y', 'z'])
+    df = pd.DataFrame(vertices, columns=["x", "y", "z"])
     # Create a PlyElement from the DataFrame
-    element = PlyElement.describe(df.to_records(index=False), 'vertex')
+    element = PlyElement.describe(df.to_records(index=False), "vertex")
     # Create a PlyData object
     ply_data = PlyData([element])
     # Write the ply file
-    ply_data.write('.threestudio_cache/output.ply')
+    ply_data.write(".threestudio_cache/output.ply")
+
 
 @threestudio.register("avatar-gaussian")
 class GaussianAvatarModel(BaseGeometry):
@@ -201,7 +204,7 @@ class GaussianAvatarModel(BaseGeometry):
         smplx_path: str = "/path/to/smplx/model"
         disable_hand_densification: bool = False
         smplx_hand_radius: float = 0.05
-        smplx_gender: str = 'neutral'
+        smplx_gender: str = "neutral"
         smplx_apose: bool = True
 
         mesh_renderer_config: dict = field(default_factory=dict)
@@ -244,9 +247,7 @@ class GaussianAvatarModel(BaseGeometry):
         self.skel.scale(-10)
 
         self.mesh_renderer = threestudio.find("smplx-mesh-renderer")(
-            self.cfg.mesh_renderer_config,
-            self.skel.vertices,
-            self.skel.faces
+            self.cfg.mesh_renderer_config, self.skel.vertices, self.skel.faces
         )
 
         output = self.mesh_renderer(512, 512)
@@ -257,9 +258,8 @@ class GaussianAvatarModel(BaseGeometry):
 
         self.feature_cache = False
         # xyz scaling rotation opacity features
-        self.feature_unet_front = NormalNet(input_nc=3, output_nc=3+3+4+1+3)
-        self.feature_unet_back = NormalNet(input_nc=3, output_nc=3+3+4+1+3)
-
+        self.feature_unet_front = NormalNet(input_nc=3, output_nc=3 + 3 + 4 + 1 + 3)
+        self.feature_unet_back = NormalNet(input_nc=3, output_nc=3 + 3 + 4 + 1 + 3)
 
         self.setup_functions()
 
@@ -267,8 +267,8 @@ class GaussianAvatarModel(BaseGeometry):
         self.feature_cache = True
         features_front = self.feature_unet_front(self.front_view_position)
         feature_back = self.feature_unet_back(self.back_view_position)
-        xyz_front = 0.1*features_front[:, :3] + self.front_view_position
-        xyz_back = 0.1*feature_back[:, :3] + self.back_view_position
+        xyz_front = 0.1 * features_front[:, :3] + self.front_view_position
+        xyz_back = 0.1 * feature_back[:, :3] + self.back_view_position
         scale_front = features_front[:, 3:6]
         scale_back = feature_back[:, 3:6]
         rotation_front = features_front[:, 6:10]
@@ -279,11 +279,41 @@ class GaussianAvatarModel(BaseGeometry):
         color_back = feature_back[:, 11:]
         mask_front = self.front_view_mask[0, 0]
         mask_back = self.back_view_mask[0, 0]
-        self._xyz = torch.cat((xyz_front.permute(0, 2, 3, 1)[0, mask_front], xyz_back.permute(0, 2, 3, 1)[0, mask_back]), dim=0)
-        self._scaling = torch.cat((scale_front.permute(0, 2, 3, 1)[0, mask_front], scale_back.permute(0, 2, 3, 1)[0, mask_back]), dim=0)
-        self._rotation = torch.cat((rotation_front.permute(0, 2, 3, 1)[0, mask_front], rotation_back.permute(0, 2, 3, 1)[0, mask_back]), dim=0)
-        self._opacity = torch.cat((opacity_front.permute(0, 2, 3, 1)[0, mask_front], opacity_back.permute(0, 2, 3, 1)[0, mask_back]), dim=0)
-        self._features_dc = torch.cat((color_front.permute(0, 2, 3, 1)[0, mask_front], color_back.permute(0, 2, 3, 1)[0, mask_back]), dim=0)
+        self._xyz = torch.cat(
+            (
+                xyz_front.permute(0, 2, 3, 1)[0, mask_front],
+                xyz_back.permute(0, 2, 3, 1)[0, mask_back],
+            ),
+            dim=0,
+        )
+        self._scaling = torch.cat(
+            (
+                scale_front.permute(0, 2, 3, 1)[0, mask_front],
+                scale_back.permute(0, 2, 3, 1)[0, mask_back],
+            ),
+            dim=0,
+        )
+        self._rotation = torch.cat(
+            (
+                rotation_front.permute(0, 2, 3, 1)[0, mask_front],
+                rotation_back.permute(0, 2, 3, 1)[0, mask_back],
+            ),
+            dim=0,
+        )
+        self._opacity = torch.cat(
+            (
+                opacity_front.permute(0, 2, 3, 1)[0, mask_front],
+                opacity_back.permute(0, 2, 3, 1)[0, mask_back],
+            ),
+            dim=0,
+        )
+        self._features_dc = torch.cat(
+            (
+                color_front.permute(0, 2, 3, 1)[0, mask_front],
+                color_back.permute(0, 2, 3, 1)[0, mask_back],
+            ),
+            dim=0,
+        )
 
     @property
     def get_scaling(self):
@@ -321,7 +351,6 @@ class GaussianAvatarModel(BaseGeometry):
         return self.covariance_activation(
             self.get_scaling, scaling_modifier, self._rotation
         )
-
 
     def construct_list_of_attributes(self):
         l = ["x", "y", "z", "nx", "ny", "nz"]
