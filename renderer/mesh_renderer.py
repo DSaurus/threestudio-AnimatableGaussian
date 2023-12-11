@@ -26,8 +26,7 @@ class SMPLXMeshRenderer(Rasterizer):
 
         # configuration for rendering front and back views
         azimuth_deg: Float[Tensor, "B"]
-        azimuth_deg = torch.linspace(-90.0, 90.0, 2)
-        print(azimuth_deg)
+        azimuth_deg = torch.linspace(0, 180.0, 2)
         elevation_deg: Float[Tensor, "B"] = torch.full_like(azimuth_deg, 0)
         camera_distances: Float[Tensor, "B"] = torch.full_like(elevation_deg, 7.5)
 
