@@ -13,23 +13,14 @@ import numpy as np
 import threestudio
 import torch
 import torch.nn.functional as F
-from gaussiansplatting.arguments import (
-    ModelParams,
-    OptimizationParams,
-    PipelineParams,
-    get_combined_args,
-)
-from gaussiansplatting.gaussian_renderer import render
-from gaussiansplatting.scene import GaussianModel, Scene
-from gaussiansplatting.scene.cameras import Camera, MiniCam
-from gaussiansplatting.scene.gaussian_model import BasicPointCloud
-from gaussiansplatting.utils.sh_utils import SH2RGB
 from PIL import Image
 from plyfile import PlyData, PlyElement
 from threestudio.systems.base import BaseLift3DSystem
 from threestudio.utils.ops import binary_cross_entropy, dot, get_cam_info_gaussian
-from threestudio.utils.poser import Skeleton
 from threestudio.utils.typing import *
+from torch.cuda.amp import autocast
+
+from ..geometry.gaussian_avatar import BasicPointCloud, Camera
 
 # import open3d as o3d
 
@@ -113,15 +104,12 @@ class GaussianDreamer(BaseLift3DSystem):
     cfg: Config
 
     def configure(self) -> None:
-        self.gaussian = GaussianModel(sh_degree=0)
+        super().configure()
         self.background_tensor = (
             torch.tensor([1, 1, 1], dtype=torch.float32, device="cuda")
             if self.cfg.bg_white
             else torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
         )
-
-        self.parser = ArgumentParser(description="Training script parameters")
-        self.pipe = PipelineParams(self.parser)
 
         self.texture_structure_joint = self.cfg.texture_structure_joint
         self.controlnet = self.cfg.controlnet
@@ -148,26 +136,33 @@ class GaussianDreamer(BaseLift3DSystem):
         depths = []
         pose_images = []
         self.viewspace_point_list = []
+        self.geometry.get_network_features()
 
         for batch_idx in range(batch["c2w"].shape[0]):
             batch["batch_idx"] = batch_idx
             fovy = batch["fovy"][batch_idx]
-            w2c, proj, cam_p = get_cam_info_gaussian(
-                c2w=batch["c2w"][batch_idx], fovx=fovy, fovy=fovy, znear=0.1, zfar=100
-            )
+            with autocast(enabled=False):
+                w2c, proj, cam_p = get_cam_info_gaussian(
+                    c2w=batch["c2w"][batch_idx],
+                    fovx=fovy,
+                    fovy=fovy,
+                    znear=0.1,
+                    zfar=100,
+                )
 
-            # import pdb; pdb.set_trace()
-            viewpoint_cam = Camera(
-                FoVx=fovy,
-                FoVy=fovy,
-                image_width=batch["width"],
-                image_height=batch["height"],
-                world_view_transform=w2c,
-                full_proj_transform=proj,
-                camera_center=cam_p,
-            )
+                viewpoint_cam = Camera(
+                    FoVx=fovy,
+                    FoVy=fovy,
+                    image_width=batch["width"],
+                    image_height=batch["height"],
+                    world_view_transform=w2c,
+                    full_proj_transform=proj,
+                    camera_center=cam_p,
+                )
 
-            render_pkg = self.renderer(viewpoint_cam, self.background_tensor, **batch)
+                render_pkg = self.renderer(
+                    viewpoint_cam, self.background_tensor, **batch
+                )
 
             depth = render_pkg["depth"]
             image = render_pkg["render"]
@@ -181,8 +176,8 @@ class GaussianDreamer(BaseLift3DSystem):
             depths.append(depth)
 
             if self.texture_structure_joint:
-                backview = abs(batch["azimuth"][id]) > 120 * np.pi / 180
-                mvp = batch["mvp_mtx"][id].detach().cpu().numpy()  # [4, 4]
+                backview = abs(batch["azimuth"][batch_idx]) > 120 * np.pi / 180
+                mvp = batch["mvp_mtx"][batch_idx].detach().cpu().numpy()  # [4, 4]
                 pose_image, _ = self.geometry.skel.humansd_draw(
                     mvp, 512, 512, backview
                 )  # [512, 512, 3], fixed pose image resolution
@@ -191,8 +186,8 @@ class GaussianDreamer(BaseLift3DSystem):
                 pose_images.append(pose_image)
             else:
                 # render pose image
-                backview = abs(batch["azimuth"][id]) > 120 * np.pi / 180
-                mvp = batch["mvp_mtx"][id].detach().cpu().numpy()  # [4, 4]
+                backview = abs(batch["azimuth"][batch_idx]) > 120 * np.pi / 180
+                mvp = batch["mvp_mtx"][batch_idx].detach().cpu().numpy()  # [4, 4]
                 pose_image, _ = self.geometry.skel.draw(
                     mvp, 512, 512, backview
                 )  # [512, 512, 3], fixed pose image resolution
@@ -203,8 +198,6 @@ class GaussianDreamer(BaseLift3DSystem):
         images = torch.stack(images, 0)
         depths = torch.stack(depths, 0)
         pose_images = torch.stack(pose_images, 0)
-
-        self.visibility_filter = self.radii > 0.0
 
         render_pkg["comp_rgb"] = images
         render_pkg["depth"] = depths
@@ -224,14 +217,14 @@ class GaussianDreamer(BaseLift3DSystem):
         self.guidance = threestudio.find(self.cfg.guidance_type)(self.cfg.guidance)
 
     def training_step(self, batch, batch_idx):
-        self.gaussian.update_learning_rate(self.true_global_step)
+        # self.gaussian.update_learning_rate(self.true_global_step)
 
         if self.true_global_step > self.cfg.half_scheduler_max_step:
             self.guidance.set_min_max_steps(
                 min_step_percent=0.02, max_step_percent=0.55
             )
 
-        self.gaussian.update_learning_rate(self.true_global_step)
+        # self.gaussian.update_learning_rate(self.true_global_step)
 
         out = self(batch)
 
@@ -305,12 +298,14 @@ class GaussianDreamer(BaseLift3DSystem):
             (
                 [
                     {
-                        "type": "rgb",
-                        "img": batch["rgb"][0],
-                        "kwargs": {"data_format": "HWC"},
+                        "type": "grayscale",
+                        "img": out["depth"][0],
+                        "kwargs": {
+                            "cmap": "jet",
+                        },
                     }
                 ]
-                if "rgb" in batch
+                if "depth" in out
                 else []
             )
             + [
@@ -450,25 +445,11 @@ class GaussianDreamer(BaseLift3DSystem):
             step=self.true_global_step,
         )
         save_path = self.get_save_path(f"last.ply")
-        self.gaussian.save_ply(save_path)
+        # self.gaussian.save_ply(save_path)
         # self.pointefig.savefig(self.get_save_path("pointe.png"))
         # o3d.io.write_point_cloud(self.get_save_path("shape.ply"), self.point_cloud)
         # self.save_gif_to_file(self.shapeimages, self.get_save_path("shape.gif"))
         # load_ply(save_path,self.get_save_path(f"it{self.true_global_step}-test-color.ply"))
-
-    def configure_optimizers(self):
-        opt = OptimizationParams(self.parser)
-
-        point_cloud = self.pcb()
-        self.gaussian.create_from_pcd(point_cloud, self.cameras_extent)
-
-        self.gaussian.training_setup(opt)
-
-        ret = {
-            "optimizer": self.gaussian.optimizer,
-        }
-
-        return ret
 
     def guidance_evaluation_save(self, comp_rgb, guidance_eval_out):
         B, size = comp_rgb.shape[:2]
