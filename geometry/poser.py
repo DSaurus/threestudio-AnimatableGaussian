@@ -832,6 +832,17 @@ class Skeleton:
         self.points3D[:, [1, 2]] = self.points3D[:, [2, 1]]
         self.vertices[:, [1, 2]] = self.vertices[:, [2, 1]]
 
+        theta = np.pi / 2  # 90 degrees in radians
+        rotation_matrix = np.array(
+            [
+                [np.cos(theta), -np.sin(theta), 0],
+                [np.sin(theta), np.cos(theta), 0],
+                [0, 0, 1],
+            ]
+        )
+        self.points3D[:, :3] = self.points3D[:, :3] @ rotation_matrix
+        self.vertices[:, :3] = self.vertices[:, :3] @ rotation_matrix
+
     def scale(self, delta):
         self.points3D[:, :3] *= 1.1 ** (-delta)
         if self.vertices is not None:
