@@ -58,7 +58,7 @@ def save_ply(vertices):
     ply_data.write(".threestudio_cache/output.ply")
 
 
-@threestudio.register("avatar-gaussian")
+@threestudio.register("avatar-gaussian-plane")
 class GaussianAvatarModel(BaseGeometry):
     @dataclass
     class Config(BaseGeometry.Config):
@@ -134,23 +134,36 @@ class GaussianAvatarModel(BaseGeometry):
             > 0.99,
             "back_view_mask": output["opacity"][1].permute(2, 0, 1).unsqueeze(0) > 0.99,
         }
+        self.front_hash_encoding = get_encoding(3, self.cfg.pos_encoding_config).to(
+            self.device
+        )
+        self.front_hash_network = get_mlp(
+            self.front_hash_encoding.n_output_dims,
+            3 + 4 + 1 + 3,
+            self.cfg.mlp_network_config,
+        ).to(self.device)
+        self.front_pos_encoding = get_encoding(3, self.cfg.pos_encoding_config).to(
+            self.device
+        )
+        self.front_pos_network = get_mlp(
+            self.front_pos_encoding.n_output_dims, 3, self.cfg.mlp_network_config
+        ).to(self.device)
 
-        # self.feature_unet_front = StyleUNet(512, 512, rgb_channel=3 + 3 + 4 + 1 + 3).to(self.device)
-        # self.feature_unet_back = StyleUNet(512, 512, rgb_channel=3 + 3 + 4 + 1 + 3).to(self.device)
-        self.feature_unet_front = NormalNet(
-            input_nc=3,
-            output_nc=3 + 3 + 4 + 1 + 3,
-            ngf=32,
-            n_blocks=3,
-            last_op=nn.Identity(),
+        self.back_hash_encoding = get_encoding(3, self.cfg.pos_encoding_config).to(
+            self.device
+        )
+        self.back_hash_network = get_mlp(
+            self.back_hash_encoding.n_output_dims,
+            3 + 4 + 1 + 3,
+            self.cfg.mlp_network_config,
         ).to(self.device)
-        self.feature_unet_back = NormalNet(
-            input_nc=3,
-            output_nc=3 + 3 + 4 + 1 + 3,
-            ngf=32,
-            n_blocks=3,
-            last_op=nn.Identity(),
+        self.back_pos_encoding = get_encoding(3, self.cfg.pos_encoding_config).to(
+            self.device
+        )
+        self.back_pos_network = get_mlp(
+            self.back_pos_encoding.n_output_dims, 3, self.cfg.mlp_network_config
         ).to(self.device)
+
         self.get_network_features()
 
         # self.base_xyz = torch.from_numpy(self.skel.sample_smplx_points(512*512)).float().to(self.device)
@@ -159,17 +172,9 @@ class GaussianAvatarModel(BaseGeometry):
             distCUDA2(self.base_xyz.float().cuda()),
             0.0000001,
         )
-        self.base_scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3) - 2
+        self.base_scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3) - 1
         self.base_opacity = inverse_sigmoid(
             self.cfg.opacity_init * torch.ones((1, 1), dtype=torch.float, device="cuda")
-        )
-
-        self.encoding = get_encoding(3, self.cfg.pos_encoding_config)
-        self.hash_network = get_mlp(
-            self.encoding.n_output_dims + 32, 3 + 4 + 1 + 3, self.cfg.mlp_network_config
-        )
-        self.pos_network = get_mlp(
-            self.encoding.n_output_dims + 32, 3, self.cfg.mlp_network_config
         )
 
         # import cv2
@@ -185,84 +190,51 @@ class GaussianAvatarModel(BaseGeometry):
     def get_network_features(self):
         front_view_position = self.cache_data["front_view_position"]
         back_view_position = self.cache_data["back_view_position"]
-        # unet_input = torch.cat([front_view_position, back_view_position], dim=1)
-        # unet_feature = self.feature_unet(unet_input)
-
-        # mvp_matrix = self.mesh_renderer.mvp_mtx[0]
-        # proj_xyz = torch.cat([self.base_xyz, torch.ones_like(self.base_xyz[:, :1])], dim=1) @ mvp_matrix.T
-        # proj_xyz = proj_xyz[:, :3] / proj_xyz[:, 3:]  # NDC in [-1, 1]
-
-        # feature_xyz = F.grid_sample(unet_feature, proj_xyz[None, :, None, :2], align_corners=True)
-        # N = proj_xyz.shape[0]
-        # feature_xyz = feature_xyz.reshape(-1, N).transpose(0, 1)
-
-        # feature_encoding = self.encoding(self.base_xyz)
-        # final_features = self.hash_network(torch.cat([feature_encoding, feature_xyz], dim=-1))
-        # pos = self.pos_network(torch.cat([feature_encoding, feature_xyz], dim=-1))
-        # self.cache_data.update({
-        #     "_xyz": self.base_xyz + 0.01*pos[:, :3],
-        #     "_scaling": final_features[:, :3],
-        #     "_rotation": final_features[:, 3:7],
-        #     "_opacity": final_features[:, 7:8],
-        #     "_features_dc": final_features[:, 8:]
-        # })
-        # return
-
-        # if False:
-        with autocast(enabled=False):
-            features_front = self.feature_unet_front(
-                front_view_position.contiguous().float()
-            )
-            feature_back = self.feature_unet_back(
-                back_view_position.contiguous().float()
-            )
-        xyz_front = 0.002 * features_front[:, :3] + front_view_position
-        xyz_back = 0.002 * feature_back[:, :3] + back_view_position
-        scale_front = features_front[:, 3:6]
-        scale_back = feature_back[:, 3:6]
-        rotation_front = features_front[:, 6:10]
-        rotation_back = feature_back[:, 6:10]
-        opacity_front = features_front[:, 10:11]
-        opacity_back = feature_back[:, 10:11]
-        color_front = features_front[:, 11:]
-        color_back = feature_back[:, 11:]
         mask_front = self.cache_data["front_view_mask"][0, 0]
         mask_back = self.cache_data["back_view_mask"][0, 0]
+
+        xyz_front = front_view_position
+        xyz_back = back_view_position
+        xyz_front = xyz_front.permute(0, 2, 3, 1)[0, mask_front]
+        xyz_back = xyz_back.permute(0, 2, 3, 1)[0, mask_back]
+
+        features_front = self.front_hash_network(self.front_hash_encoding(xyz_front))
+        features_back = self.back_hash_network(self.back_hash_encoding(xyz_back))
+        pos_front = (
+            0.002 * self.front_pos_network(self.front_pos_encoding(xyz_front))
+            + xyz_front
+        )
+        pos_back = (
+            0.002 * self.back_pos_network(self.back_pos_encoding(xyz_back)) + xyz_back
+        )
+        scale_front = features_front[:, :3]
+        scale_back = features_back[:, :3]
+        rotation_front = features_front[:, 3:7]
+        rotation_back = features_back[:, 3:7]
+        opacity_front = features_front[:, 7:8]
+        opacity_back = features_back[:, 7:8]
+        color_front = features_front[:, 8:]
+        color_back = features_back[:, 8:]
         self.cache_data.update(
             {
                 "_xyz": torch.cat(
-                    (
-                        xyz_front.permute(0, 2, 3, 1)[0, mask_front],
-                        xyz_back.permute(0, 2, 3, 1)[0, mask_back],
-                    ),
+                    (pos_front, pos_back),
                     dim=0,
                 ),
                 "_scaling": torch.cat(
-                    (
-                        scale_front.permute(0, 2, 3, 1)[0, mask_front],
-                        scale_back.permute(0, 2, 3, 1)[0, mask_back],
-                    ),
+                    (scale_front, scale_back),
                     dim=0,
                 ),
                 "_rotation": torch.cat(
-                    (
-                        rotation_front.permute(0, 2, 3, 1)[0, mask_front],
-                        rotation_back.permute(0, 2, 3, 1)[0, mask_back],
-                    ),
+                    (rotation_front, rotation_back),
                     dim=0,
                 ),
                 "_opacity": torch.cat(
-                    (
-                        opacity_front.permute(0, 2, 3, 1)[0, mask_front],
-                        opacity_back.permute(0, 2, 3, 1)[0, mask_back],
-                    ),
+                    (opacity_front, opacity_back),
                     dim=0,
                 ),
                 "_features_dc": torch.cat(
-                    (
-                        color_front.permute(0, 2, 3, 1)[0, mask_front],
-                        color_back.permute(0, 2, 3, 1)[0, mask_back],
-                    ),
+                    (color_front, color_back),
                     dim=0,
                 ),
             }
