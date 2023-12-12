@@ -26,7 +26,6 @@ from torch.cuda.amp import autocast
 from .gaussian_function import *
 from .network import NormalNet
 from .poser import Skeleton
-from .styleunet.styleunet import StyleUNet
 
 
 class BasicPointCloud(NamedTuple):
